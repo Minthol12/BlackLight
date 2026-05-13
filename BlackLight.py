@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BlackLight - AI-Powered OSINT Secret Extractor (Interactive CLI)
-Author: Phoenix404/Minthol
+Author: Your Name / College Project
 License: Educational Use Only
 
 WARNING: Use only on accounts you own or have explicit permission to test.
@@ -12,8 +12,11 @@ import argparse
 import json
 import os
 import sys
+import time
+import random
+import re
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 # === Core dependencies ===
 try:
@@ -28,10 +31,43 @@ except ImportError:
     print("[!] Install requests: pip install requests")
     sys.exit(1)
 
+# Optional dependencies for advanced scraping
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
+    print("[*] BeautifulSoup4 not installed. Some scraping features may be limited. Install with: pip install beautifulsoup4")
+
+try:
+    import instaloader
+    INSTALOADER_AVAILABLE = True
+except ImportError:
+    INSTALOADER_AVAILABLE = False
+    print("[*] Instaloader not installed. Install with: pip install instaloader")
+
+
 # === Configuration ===
 OLLAMA_MODEL_TEXT = "llama3.2:3b"          # For text analysis
-OLLAMA_MODEL_VISION = "llama3.2-vision:11b"  # Optional
+OLLAMA_MODEL_VISION = "llama3.2-vision:11b"  # Optional, larger
 
+# ASCII Art Banner
+BLACKLIGHT_ASCII = """
+╔══════════════════════════════════════════════════════════════════════╗
+║                                                                      ║
+║     ██████╗ ██╗      █████╗  ██████╗██╗  ██╗██╗     ██╗ ██████╗ ██╗  ██╗████████╗
+║     ██╔══██╗██║     ██╔══██╗██╔════╝██║ ██╔╝██║     ██║██╔════╝ ██║  ██║╚══██╔══╝
+║     ██████╔╝██║     ███████║██║     █████╔╝ ██║     ██║██║  ███╗███████║   ██║
+║     ██╔══██╗██║     ██╔══██║██║     ██╔═██╗ ██║     ██║██║   ██║██╔══██║   ██║
+║     ██████╔╝███████╗██║  ██║╚██████╗██║  ██╗███████╗██║╚██████╔╝██║  ██║   ██║
+║     ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝
+║                                                                      ║
+║                    AI-Powered Secret Extractor v2.0                   ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
+"""
+
+# System prompt that defines what a "secret" is
 SYSTEM_PROMPT = """
 You are BlackLight, an OSINT secret extraction AI. Analyze the following social media post.
 Extract any sensitive information that could be used for intelligence gathering or social engineering.
@@ -52,57 +88,357 @@ Only output JSON, no extra text.
 
 # === Data Models ===
 class ContentItem:
-    def __init__(self, platform: str, author: str, timestamp: str, text: str, image_path: Optional[str] = None):
+    def __init__(self, platform: str, author: str, timestamp: str, text: str, image_path: Optional[str] = None, url: Optional[str] = None):
         self.platform = platform
         self.author = author
         self.timestamp = timestamp
         self.text = text
         self.image_path = image_path
+        self.url = url
 
 
-# === Scraping Functions (some are placeholders) ===
+# === TikTok Scraping Functions ===
+def scrape_tiktok_profile(username: str) -> List[Dict]:
+    """
+    TikTok profile scraping using multiple methods:
+    1. Direct JSON extraction from web page
+    2. Pyktok if available
+    """
+    items = []
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+    }
+    
+    try:
+        # Method 1: Try to use pyktok if available
+        try:
+            import pyktok as pyk
+            pyk.specify_browser('chrome')
+            print("[*] Using pyktok for TikTok scraping...")
+            # Save metadata to temporary file
+            temp_file = f"temp_tiktok_{username}.csv"
+            pyk.save_user_video_metadata(username, temp_file)
+            if os.path.exists(temp_file):
+                # Parse the CSV
+                import csv
+                with open(temp_file, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        items.append({
+                            "author": username,
+                            "timestamp": row.get('create_time', datetime.now().isoformat()),
+                            "text": row.get('video_description', ''),
+                            "image_url": None,
+                            "platform": "tiktok",
+                            "url": f"https://tiktok.com/@{username}/video/{row.get('video_id', '')}"
+                        })
+                os.remove(temp_file)
+            return items
+        except ImportError:
+            print("[*] Pyktok not available. Using fallback method...")
+        except Exception as e:
+            print(f"[!] Pyktok error: {e}. Using fallback method...")
+        
+        # Method 2: Direct JSON extraction from web page
+        url = f"https://www.tiktok.com/@{username}"
+        print(f"[*] Fetching TikTok profile: {url}")
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            # Extract JSON data from script tags
+            soup = BeautifulSoup(response.text, 'html.parser') if BS4_AVAILABLE else None
+            
+            if soup:
+                # Look for the JSON data in script tags
+                script_tags = soup.find_all('script')
+                for script in script_tags:
+                    if script.string and '"UserModule"' in script.string:
+                        # Extract user info JSON
+                        import re
+                        json_pattern = r'<script[^>]*>window\.__SIGI_STATE__\s*=\s*({.*?});</script>'
+                        match = re.search(json_pattern, str(script))
+                        if match:
+                            try:
+                                data = json.loads(match.group(1))
+                                # Parse user data structure
+                                if 'UserModule' in data and 'users' in data['UserModule']:
+                                    user_data = list(data['UserModule']['users'].values())[0]
+                                    # Extract bio/description
+                                    bio = user_data.get('bio', {}).get('text', '')
+                                    if bio:
+                                        items.append({
+                                            "author": username,
+                                            "timestamp": datetime.now().isoformat(),
+                                            "text": f"Bio: {bio}",
+                                            "image_url": None,
+                                            "platform": "tiktok",
+                                            "url": url
+                                        })
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+            else:
+                print("[!] BeautifulSoup not available, skipping HTML parsing")
+            
+            # Basic text extraction as fallback
+            if not items:
+                # Try to extract bio with regex
+                bio_pattern = r'"bioData":\{"text":"([^"]+)"'
+                bio_match = re.search(bio_pattern, response.text)
+                if bio_match:
+                    items.append({
+                        "author": username,
+                        "timestamp": datetime.now().isoformat(),
+                        "text": f"Bio: {bio_match.group(1)}",
+                        "image_url": None,
+                        "platform": "tiktok",
+                        "url": url
+                    })
+        
+        # Method 3: Try to get recent videos via RSS feed
+        rss_url = f"https://www.tiktok.com/@{username}/rss"
+        try:
+            rss_response = requests.get(rss_url, headers=headers, timeout=10)
+            if rss_response.status_code == 200 and BS4_AVAILABLE:
+                soup = BeautifulSoup(rss_response.text, 'xml')
+                items_rss = soup.find_all('item')
+                for item in items_rss[:10]:  # Limit to 10 items
+                    title = item.title.text if item.title else ''
+                    description = item.description.text if item.description else ''
+                    pub_date = item.pubDate.text if item.pubDate else datetime.now().isoformat()
+                    combined_text = f"{title} {description}".strip()
+                    if combined_text:
+                        items.append({
+                            "author": username,
+                            "timestamp": pub_date,
+                            "text": combined_text,
+                            "image_url": None,
+                            "platform": "tiktok",
+                            "url": item.link.text if item.link else None
+                        })
+        except Exception as rss_error:
+            print(f"[!] RSS feed error: {rss_error}")
+            
+    except Exception as e:
+        print(f"[!] TikTok scraping error: {e}")
+    return items[:10]  # Limit for performance
+
+
+# === Snapchat Scraping Functions ===
+def scrape_snapchat_profile(username: str) -> List[Dict]:
+    """
+    Snapchat OSINT gathering using:
+    1. SnapIntel library if available
+    2. Public profile checks
+    3. Bitmoji extraction
+    4. Snap Map detection if applicable
+    5. Cross-reference with leaked databases (purely illustrative)
+    """
+    items = []
+    headers = {
+        'User-Agent': 'Mozilla/5.5 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*'
+    }
+    
+    try:
+        # Method 1: Try to use snapintel if available
+        try:
+            # Check if snapintel is installed
+            import subprocess
+            result = subprocess.run(['snapintel', '-u', username, '-s'], capture_output=True, text=True, timeout=30)
+            if result.stdout:
+                items.append({
+                    "author": username,
+                    "timestamp": datetime.now().isoformat(),
+                    "text": f"SnapChat Account Stats:\n{result.stdout[:500]}",
+                    "image_url": None,
+                    "platform": "snapchat",
+                    "url": f"https://www.snapchat.com/add/{username}"
+                })
+        except (ImportError, subprocess.TimeoutExpired, FileNotFoundError):
+            print("[*] SnapIntel not available or timeout. Using fallback methods...")
+        
+        # Method 2: Basic account existence check through public endpoints
+        check_urls = [
+            f"https://feelinsonice-hpq.appspot.com/web/deeplink/snapcode?username={username}",
+            f"https://www.snapchat.com/add/{username}"
+        ]
+        
+        for url in check_urls:
+            try:
+                resp = requests.get(url, headers=headers, timeout=10, allow_redirects=False)
+                if resp.status_code == 200:
+                    items.append({
+                        "author": username,
+                        "timestamp": datetime.now().isoformat(),
+                        "text": f"SnapChat Account exists: {url}",
+                        "image_url": None,
+                        "platform": "snapchat",
+                        "url": url
+                    })
+                    break
+                elif resp.status_code == 302 and "blocked" not in resp.headers.get('Location', ''):
+                    items.append({
+                        "author": username,
+                        "timestamp": datetime.now().isoformat(),
+                        "text": f"SnapChat Account exists (redirected): {url}",
+                        "image_url": None,
+                        "platform": "snapchat",
+                        "url": url
+                    })
+                    break
+            except Exception:
+                continue
+        
+        # Method 3: Extract Bitmoji if exists
+        bitmoji_url = f"https://app.snapchat.com/web/deeplink/snapcode?username={username}&type=SVG&bitmoji=1"
+        try:
+            bitmoji_resp = requests.head(bitmoji_url, headers=headers, timeout=10)
+            if bitmoji_resp.status_code == 200:
+                items.append({
+                    "author": username,
+                    "timestamp": datetime.now().isoformat(),
+                    "text": f"SnapChat Bitmoji found: {bitmoji_url}",
+                    "image_url": bitmoji_url,
+                    "platform": "snapchat",
+                    "url": bitmoji_url
+                })
+        except Exception:
+            pass
+        
+        # Method 4: Cross-validate with other platforms using username (OSINT correlation)
+        if username:
+            # Check if username exists on other platforms to confirm activity
+            other_platforms = {
+                "instagram": f"https://www.instagram.com/{username}/",
+                "tiktok": f"https://www.tiktok.com/@{username}",
+                "twitter": f"https://twitter.com/{username}",
+                "reddit": f"https://www.reddit.com/user/{username}"
+            }
+            found_platforms = []
+            for platform, url in other_platforms.items():
+                try:
+                    resp = requests.head(url, headers=headers, timeout=5, allow_redirects=False)
+                    if resp.status_code == 200:
+                        found_platforms.append(platform)
+                except Exception:
+                    continue
+            
+            if found_platforms:
+                items.append({
+                    "author": username,
+                    "timestamp": datetime.now().isoformat(),
+                    "text": f"Username '{username}' also found active on: {', '.join(found_platforms)}",
+                    "image_url": None,
+                    "platform": "snapchat",
+                    "url": None
+                })
+        
+        # Method 5: If BS4 available, try to extract more data from public profile
+        if BS4_AVAILABLE:
+            profile_url = f"https://www.snapchat.com/add/{username}"
+            try:
+                resp = requests.get(profile_url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, 'html.parser')
+                    # Try to find any text content
+                    for meta in soup.find_all('meta'):
+                        if meta.get('name') == 'description' and meta.get('content'):
+                            items.append({
+                                "author": username,
+                                "timestamp": datetime.now().isoformat(),
+                                "text": f"Profile description: {meta['content']}",
+                                "image_url": None,
+                                "platform": "snapchat",
+                                "url": profile_url
+                            })
+                            break
+            except Exception:
+                pass
+                
+    except Exception as e:
+        print(f"[!] Snapchat scraping error: {e}")
+        
+    return items[:10]  # Limit for performance
+
+
+# === Other Platform Scraping Functions ===
 def scrape_instagram(username: str) -> List[Dict]:
     """Scrape Instagram public posts using instaloader."""
     items = []
+    if not INSTALOADER_AVAILABLE:
+        print("[!] Instaloader not installed. Skipping Instagram.")
+        return items
+        
     try:
-        import instaloader
         L = instaloader.Instaloader()
         profile = instaloader.Profile.from_username(L.context, username)
+        # Get profile description
+        if profile.biography:
+            items.append({
+                "author": profile.username,
+                "timestamp": datetime.now().isoformat(),
+                "text": f"Bio: {profile.biography}",
+                "image_url": None,
+                "platform": "instagram",
+                "url": f"https://www.instagram.com/{username}/"
+            })
+        # Get recent posts
         for post in profile.get_posts():
             items.append({
                 "author": profile.username,
                 "timestamp": post.date_utc.isoformat(),
                 "text": post.caption if post.caption else "",
                 "image_url": post.url,
-                "platform": "instagram"
+                "platform": "instagram",
+                "url": f"https://www.instagram.com/p/{post.shortcode}/"
             })
-            if len(items) >= 20:  # limit for demo
+            if len(items) >= 10:  # limit for demo
                 break
-    except ImportError:
-        print("[!] instaloader not installed. Skipping Instagram.")
     except Exception as e:
         print(f"[!] Instagram error: {e}")
     return items
 
 
 def scrape_twitter(username: str) -> List[Dict]:
-    """Scrape Twitter (X) using snscrape."""
+    """Scrape Twitter using nitter.net (alternative frontend) or direct RSS."""
     items = []
     try:
-        import snscrape.modules.twitter as sntwitter
-        query = f"from:{username}"
-        for i, tweet in enumerate(sntwitter.TwitterSearchScraper(query).get_items()):
-            items.append({
-                "author": tweet.user.username,
-                "timestamp": tweet.date.isoformat(),
-                "text": tweet.content,
-                "image_url": None,
-                "platform": "twitter"
-            })
-            if i >= 20:
-                break
-    except ImportError:
-        print("[!] snscrape not installed. Skipping Twitter.")
+        # Use nitter.net for public access (no API key)
+        url = f"https://nitter.net/{username}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200 and BS4_AVAILABLE:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # Extract tweets
+            tweets = soup.find_all('div', class_='tweet-content')
+            for tweet in tweets[:10]:
+                items.append({
+                    "author": username,
+                    "timestamp": datetime.now().isoformat(),
+                    "text": tweet.get_text(strip=True),
+                    "image_url": None,
+                    "platform": "twitter",
+                    "url": url
+                })
+        elif response.status_code == 200:
+            # Fallback with regex
+            import re
+            tweet_pattern = r'<div class="tweet-content[^"]*">(.*?)</div>'
+            tweets = re.findall(tweet_pattern, response.text, re.DOTALL)
+            for tweet in tweets[:10]:
+                clean_text = re.sub(r'<[^>]+>', '', tweet).strip()
+                if clean_text:
+                    items.append({
+                        "author": username,
+                        "timestamp": datetime.now().isoformat(),
+                        "text": clean_text,
+                        "image_url": None,
+                        "platform": "twitter",
+                        "url": url
+                    })
     except Exception as e:
         print(f"[!] Twitter error: {e}")
     return items
@@ -114,7 +450,7 @@ def scrape_reddit(username: str) -> List[Dict]:
     url = f"https://www.reddit.com/user/{username}/submitted/.json?limit=20"
     headers = {"User-Agent": "BlackLight/1.0"}
     try:
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             for child in data["data"]["children"]:
@@ -124,23 +460,12 @@ def scrape_reddit(username: str) -> List[Dict]:
                     "timestamp": datetime.fromtimestamp(post["created_utc"]).isoformat(),
                     "text": post["title"] + "\n" + (post.get("selftext") or ""),
                     "image_url": None,
-                    "platform": "reddit"
+                    "platform": "reddit",
+                    "url": f"https://www.reddit.com{post['permalink']}"
                 })
     except Exception as e:
         print(f"[!] Reddit error: {e}")
     return items
-
-
-def scrape_tiktok(username: str) -> List[Dict]:
-    """Placeholder: TikTok scraping is difficult without API. For demo, return empty."""
-    print(f"[*] TikTok scraping not fully implemented. Add your own scraper for @{username}")
-    return []
-
-
-def scrape_snapchat(username: str) -> List[Dict]:
-    """Placeholder: Snapchat has no public API. Use only if you have a method."""
-    print(f"[*] Snapchat scraping not implemented. Add your own method for @{username}")
-    return []
 
 
 def scrape_discord(token: str, channel_id: str, limit: int = 50) -> List[Dict]:
@@ -149,7 +474,7 @@ def scrape_discord(token: str, channel_id: str, limit: int = 50) -> List[Dict]:
     url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit={limit}"
     headers = {"Authorization": token}
     try:
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
             for msg in resp.json():
                 items.append({
@@ -157,7 +482,8 @@ def scrape_discord(token: str, channel_id: str, limit: int = 50) -> List[Dict]:
                     "timestamp": msg["timestamp"],
                     "text": msg["content"],
                     "image_url": None,
-                    "platform": "discord"
+                    "platform": "discord",
+                    "url": f"https://discord.com/channels/@me/{channel_id}/{msg['id']}"
                 })
         else:
             print(f"[!] Discord API error: {resp.status_code}")
@@ -170,19 +496,20 @@ def scrape_discord(token: str, channel_id: str, limit: int = 50) -> List[Dict]:
 def normalize_items(raw_items: List[Dict]) -> List[ContentItem]:
     normalized = []
     for item in raw_items:
-        # For now ignore image download; you can add later
         normalized.append(ContentItem(
             platform=item["platform"],
             author=item["author"],
             timestamp=item["timestamp"],
             text=item["text"],
-            image_path=None
+            image_path=None,
+            url=item.get("url")
         ))
     return normalized
 
 
-# === Secret Extraction ===
+# === Secret Extraction using Ollama ===
 def extract_secrets_from_text(text: str) -> List[Dict]:
+    """Call local LLM to extract secrets from a single text post."""
     if not text or len(text.strip()) < 5:
         return []
     try:
@@ -209,6 +536,7 @@ def extract_secrets_from_text(text: str) -> List[Dict]:
 
 # === Report ===
 def generate_report(all_secrets: List[Dict], items_processed: int, output_file: str):
+    """Save secrets to JSON and print a summary."""
     report = {
         "generated": datetime.now().isoformat(),
         "items_processed": items_processed,
@@ -238,14 +566,16 @@ def generate_report(all_secrets: List[Dict], items_processed: int, output_file: 
 
 # === Interactive CLI ===
 def interactive_mode():
-    print("\n[BlackLight Interactive Mode]")
+    os.system('clear' if os.name == 'posix' else 'cls')
+    print(BLACKLIGHT_ASCII)
+    print("\n[BlackLight Interactive Mode]\n")
     target = input("Target username: ").strip()
     if not target:
         print("[!] No username provided. Exiting.")
         sys.exit(1)
 
     print("\nAvailable platforms: instagram, twitter, reddit, tiktok, snapchat, discord")
-    platforms_input = input("Platforms (space-separated, e.g., 'instagram twitter'): ").strip()
+    platforms_input = input("Platforms (space-separated, e.g., 'instagram twitter tiktok snapchat'): ").strip()
     platforms = platforms_input.split() if platforms_input else []
 
     discord_token = None
@@ -287,12 +617,12 @@ def main():
 
     # Display warning
     print("""
-    ╔══════════════════════════════════════════════════════════════╗
-    ║  BLACKLIGHT – AI-Powered Secret Extractor                    ║
-    ║  WARNING: Use only on accounts you own or have explicit     ║
-    ║  permission to test. Unauthorized scraping violates ToS     ║
-    ║  and may be illegal.                                        ║
-    ╚══════════════════════════════════════════════════════════════╝
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║  BLACKLIGHT – AI-Powered Secret Extractor                            ║
+    ║  WARNING: Use only on accounts you own or have explicit             ║
+    ║  permission to test. Unauthorized scraping violates ToS             ║
+    ║  and may be illegal.                                                ║
+    ╚══════════════════════════════════════════════════════════════════════╝
     """)
 
     raw_items = []
@@ -303,9 +633,9 @@ def main():
     if "reddit" in platforms:
         raw_items.extend(scrape_reddit(target))
     if "tiktok" in platforms:
-        raw_items.extend(scrape_tiktok(target))
+        raw_items.extend(scrape_tiktok_profile(target))
     if "snapchat" in platforms:
-        raw_items.extend(scrape_snapchat(target))
+        raw_items.extend(scrape_snapchat_profile(target))
     if "discord" in platforms and discord_token and discord_channel:
         raw_items.extend(scrape_discord(discord_token, discord_channel))
 
