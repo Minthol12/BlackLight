@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BlackLight - AI-Powered OSINT Secret Extractor (Interactive CLI)
-Author: Your Name / College Project
+Author: Phoenix404/Minthol
 License: Educational Use Only
 
 WARNING: Use only on accounts you own or have explicit permission to test.
